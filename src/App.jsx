@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import {
   onAuthStateChanged,
@@ -86,14 +85,15 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState("dashboard");
   const [dark, setDark] = useState(
-    localStorage.getItem("theme") !== "light"
+    () => localStorage.getItem("theme") !== "light"
   );
   const [items, setItems] = useState([]);
   const [budgets, setBudgets] = useState([]);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
+    return onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
       setLoading(false);
     });
   }, []);
@@ -106,22 +106,61 @@ export default function App() {
   const load = async () => {
     if (!auth.currentUser) return;
 
-    const tq = query(
-      collection(db, "transactions"),
-      where("userId", "==", auth.currentUser.uid),
-      orderBy("date", "desc")
-    );
+    try {
+      setLoadError("");
 
-    const bq = query(
-      collection(db, "budgets"),
-      where("userId", "==", auth.currentUser.uid)
-    );
+      const uid = auth.currentUser.uid;
 
-    const [ts, bs] = await Promise.all([getDocs(tq), getDocs(bq)]);
+      // FIX: removed orderBy so Firestore does not require
+      // a composite index for userId + date.
+      const transactionQuery = query(
+        collection(db, "transactions"),
+        where("userId", "==", uid)
+      );
 
-    setItems(ts.docs.map((x) => ({ id: x.id, ...x.data() })));
-    setBudgets(bs.docs.map((x) => ({ id: x.id, ...x.data() })));
+      const budgetQuery = query(
+        collection(db, "budgets"),
+        where("userId", "==", uid)
+      );
+
+      const [transactionSnapshot, budgetSnapshot] = await Promise.all([
+        getDocs(transactionQuery),
+        getDocs(budgetQuery),
+      ]);
+
+      // FIX: sort transactions locally instead of using
+      // Firestore orderBy.
+      setItems(
+        transactionSnapshot.docs
+          .map((snapshot) => ({
+            id: snapshot.id,
+            ...snapshot.data(),
+          }))
+          .sort((a, b) =>
+            String(b.date || "").localeCompare(String(a.date || ""))
+          )
+      );
+
+      setBudgets(
+        budgetSnapshot.docs.map((snapshot) => ({
+          id: snapshot.id,
+          ...snapshot.data(),
+        }))
+      );
+    } catch (error) {
+      console.error("Failed to load data:", error);
+      setLoadError("Could not refresh your data. Please try again.");
+    }
   };
+
+  useEffect(() => {
+    if (user) {
+      load();
+    } else {
+      setItems([]);
+      setBudgets([]);
+    }
+  }, [user]);
 
   const exportCSV = () => {
     const headers = [
@@ -158,20 +197,19 @@ export default function App() {
 
     link.href = url;
     link.download = "CloudSpend-transactions.csv";
+    document.body.appendChild(link);
     link.click();
-
+    link.remove();
     URL.revokeObjectURL(url);
   };
-
-  useEffect(() => {
-    if (user) load();
-  }, [user]);
 
   if (loading) {
     return <div className="loading">Loading CloudSpend…</div>;
   }
 
-  if (!user) return <Auth />;
+  if (!user) {
+    return <Auth />;
+  }
 
   return (
     <div className="shell">
@@ -187,20 +225,23 @@ export default function App() {
             ["analytics", "Analytics", BarChart3],
             ["budgets", "Budgets", PiggyBank],
             ["profile", "Profile", User],
-          ].map(([p, t, I]) => (
+          ].map(([pageId, label, Icon]) => (
             <button
-              key={p}
-              className={page === p ? "nav active" : "nav"}
-              onClick={() => setPage(p)}
+              key={pageId}
+              className={page === pageId ? "nav active" : "nav"}
+              onClick={() => setPage(pageId)}
             >
-              <I size={19} />
-              {t}
+              <Icon size={19} />
+              {label}
             </button>
           ))}
         </nav>
 
         <div className="bottom">
-          <button className="nav" onClick={() => setDark(!dark)}>
+          <button
+            className="nav"
+            onClick={() => setDark((current) => !current)}
+          >
             {dark ? <Sun /> : <Moon />}
             {dark ? "Light mode" : "Dark mode"}
           </button>
@@ -215,12 +256,24 @@ export default function App() {
       <main>
         <header>
           <span>{user.email}</span>
-          <button className="icon" onClick={() => setDark(!dark)}>
+          <button
+            className="icon"
+            onClick={() => setDark((current) => !current)}
+          >
             {dark ? <Sun /> : <Moon />}
           </button>
         </header>
 
         <div className="page">
+          {loadError && (
+            <div className="message">
+              {loadError}{" "}
+              <button className="link" onClick={load}>
+                Retry
+              </button>
+            </div>
+          )}
+
           {page === "dashboard" && (
             <Dashboard items={items} setPage={setPage} />
           )}
@@ -249,30 +302,30 @@ export default function App() {
 function Auth() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
-  const [pw, setPw] = useState("");
+  const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [msg, setMsg] = useState("");
+  const [message, setMessage] = useState("");
 
   const submit = async (e) => {
     e.preventDefault();
-    setMsg("");
+    setMessage("");
 
     try {
       if (mode === "login") {
-        await signInWithEmailAndPassword(auth, email, pw);
+        await signInWithEmailAndPassword(auth, email, password);
       } else if (mode === "register") {
-        if (pw !== confirm) {
-          setMsg("Passwords do not match.");
+        if (password !== confirm) {
+          setMessage("Passwords do not match.");
           return;
         }
 
-        await createUserWithEmailAndPassword(auth, email, pw);
+        await createUserWithEmailAndPassword(auth, email, password);
       } else {
         await sendPasswordResetEmail(auth, email);
-        setMsg("Password reset email sent.");
+        setMessage("Password reset email sent.");
       }
-    } catch (x) {
-      setMsg(x.message.replace("Firebase: ", ""));
+    } catch (error) {
+      setMessage(error.message.replace("Firebase: ", ""));
     }
   };
 
@@ -297,7 +350,7 @@ function Auth() {
               : "We'll send a reset link to your email."}
         </p>
 
-        {msg && <div className="message">{msg}</div>}
+        {message && <div className="message">{message}</div>}
 
         <form onSubmit={submit}>
           <label>
@@ -315,8 +368,8 @@ function Auth() {
               Password
               <input
                 type="password"
-                value={pw}
-                onChange={(e) => setPw(e.target.value)}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 required
               />
             </label>
@@ -334,7 +387,7 @@ function Auth() {
             </label>
           )}
 
-          <button className="primary">
+          <button type="submit" className="primary">
             {mode === "login"
               ? "Login"
               : mode === "register"
@@ -368,70 +421,75 @@ function Dashboard({ items, setPage }) {
   const [period, setPeriod] = useState("30");
 
   const income = items
-    .filter((x) => x.type === "income")
-    .reduce((s, x) => s + Number(x.amount), 0);
+    .filter((item) => item.type === "income")
+    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
   const expense = items
-    .filter((x) => x.type === "expense")
-    .reduce((s, x) => s + Number(x.amount), 0);
+    .filter((item) => item.type === "expense")
+    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
-  // Historical balance: each transaction creates its own point.
-  // Earlier transactions are included in the starting balance
-  // even when the chart is filtered to the last 7 or 30 days.
   const chartData = useMemo(() => {
-    const sorted = [...items].sort((a, b) => {
-      const byDate = String(a.date || "").localeCompare(
-        String(b.date || "")
-      );
+  const sorted = [...items].sort((a, b) => {
+    const dateOrder = String(a.date || "").localeCompare(
+      String(b.date || "")
+    );
 
-      if (byDate !== 0) return byDate;
+    if (dateOrder !== 0) return dateOrder;
 
-      return (a.createdAt?.seconds || 0) -
-        (b.createdAt?.seconds || 0);
-    });
+    return (
+      (a.createdAt?.seconds || 0) -
+      (b.createdAt?.seconds || 0)
+    );
+  });
 
-    const days = period === "all" ? Infinity : Number(period);
-    const cutoff = new Date();
-    cutoff.setHours(0, 0, 0, 0);
+  const days = period === "all" ? Infinity : Number(period);
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
 
-    if (days !== Infinity) {
-      cutoff.setDate(cutoff.getDate() - days + 1);
+  if (days !== Infinity) {
+    cutoff.setDate(cutoff.getDate() - days + 1);
+  }
+
+  let balance = 0;
+  const result = [];
+
+  sorted.forEach((item) => {
+    const date = item.date || "Unknown";
+    const amount = Number(item.amount || 0);
+
+    const transactionDate =
+      date === "Unknown"
+        ? null
+        : new Date(`${date}T00:00:00`);
+
+    if (
+      days !== Infinity &&
+      transactionDate &&
+      transactionDate < cutoff
+    ) {
+      balance += item.type === "income" ? amount : -amount;
+      return;
     }
 
-    let balance = 0;
-    const running = [];
+    balance += item.type === "income" ? amount : -amount;
 
-    sorted.forEach((item) => {
-      const date = item.date || "Unknown";
-      const amount = Number(item.amount || 0);
-
-      balance += item.type === "income" ? amount : -amount;
-
-      const transactionDate =
-        date === "Unknown" ? null : new Date(`${date}T00:00:00`);
-
-      if (
-        days === Infinity ||
-        !transactionDate ||
-        transactionDate >= cutoff
-      ) {
-        running.push({
-          date:
-            date === "Unknown"
-              ? date
-              : new Date(`${date}T00:00:00`).toLocaleDateString(
-                  "en-IN",
-                  { day: "numeric", month: "short" }
-                ),
-          balance,
-          income: item.type === "income" ? amount : 0,
-          expense: item.type === "expense" ? amount : 0,
-        });
-      }
+    result.push({
+      date:
+        date === "Unknown"
+          ? date
+          : new Date(`${date}T00:00:00`).toLocaleDateString(
+              "en-IN",
+              { day: "numeric", month: "short" }
+            ),
+      balance,
+      income: item.type === "income" ? amount : 0,
+      expense: item.type === "expense" ? amount : 0,
+      transaction: item.title,
     });
+  });
 
-    return running;
-  }, [items, period]);
+  return result;
+}, [items, period]);
 
   return (
     <>
@@ -490,9 +548,7 @@ function Dashboard({ items, setPage }) {
 
         <div className="flow-total">
           <strong>{money(income - expense)}</strong>
-          <span>
-            <i /> CURRENT NET BALANCE
-          </span>
+          <span><i /> CURRENT NET BALANCE</span>
         </div>
 
         <div className="flow-chart">
@@ -538,13 +594,13 @@ function Dashboard({ items, setPage }) {
                 />
 
                 <YAxis
-                  tickFormatter={(v) =>
-                    v === 0
+                  tickFormatter={(value) =>
+                    value === 0
                       ? "₹0"
                       : `₹${
-                          Math.abs(v) >= 1000
-                            ? (v / 1000).toFixed(1) + "k"
-                            : v
+                          Math.abs(value) >= 1000
+                            ? (value / 1000).toFixed(1) + "k"
+                            : value
                         }`
                   }
                   tick={{ fill: "#969fbd", fontSize: 11 }}
@@ -566,7 +622,7 @@ function Dashboard({ items, setPage }) {
                     borderRadius: 12,
                     color: "#f4f2ff",
                   }}
-                  formatter={(v) => [money(v), "Running balance"]}
+                  formatter={(value) => [money(value), "Running balance"]}
                   labelStyle={{ color: "#b9a5ff" }}
                 />
 
@@ -576,18 +632,9 @@ function Dashboard({ items, setPage }) {
                   stroke="#9b7bff"
                   strokeWidth={3}
                   fill="url(#balanceGlow)"
-                  dot={
-                    chartData.length < 2
-                      ? { r: 4, fill: "#45e6ff", stroke: "#9b7bff" }
-                      : false
-                  }
-                  activeDot={{
-                    r: 6,
-                    fill: "#45e6ff",
-                    stroke: "#fff",
-                    strokeWidth: 2,
-                  }}
-                  isAnimationActive
+                  dot={false}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={false}
                 />
               </AreaChart>
             </ResponsiveContainer>
@@ -599,15 +646,9 @@ function Dashboard({ items, setPage }) {
         </div>
 
         <div className="flow-legend">
-          <span>
-            <i className="legend-purple" /> Running balance
-          </span>
-          <span>
-            <i className="legend-cyan" /> Income increases it
-          </span>
-          <span>
-            <i className="legend-red" /> Expenses decrease it
-          </span>
+          <span><i className="legend-purple" /> Running balance</span>
+          <span><i className="legend-cyan" /> Income increases it</span>
+          <span><i className="legend-red" /> Expenses decrease it</span>
         </div>
       </section>
 
@@ -619,17 +660,15 @@ function Dashboard({ items, setPage }) {
           </button>
         </div>
 
-        {items.slice(0, 7).map((x) => (
-          <div className="row" key={x.id}>
+        {items.slice(0, 7).map((item) => (
+          <div className="row" key={item.id}>
             <div>
-              <b>{x.title}</b>
-              <small>
-                {x.category} · {x.date}
-              </small>
+              <b>{item.title}</b>
+              <small>{item.category} · {item.date}</small>
             </div>
-            <strong className={x.type}>
-              {x.type === "income" ? "+" : "-"}
-              {money(x.amount)}
+            <strong className={item.type}>
+              {item.type === "income" ? "+" : "-"}
+              {money(item.amount)}
             </strong>
           </div>
         ))}
@@ -655,29 +694,65 @@ function Stat({ icon, label, value }) {
 }
 
 function Transactions({ items, reload, exportCSV }) {
-  const [form, setForm] = useState(blank);
+  const [form, setForm] = useState({ ...blank });
   const [editing, setEditing] = useState(null);
   const [search, setSearch] = useState("");
   const [cat, setCat] = useState("All");
   const [type, setType] = useState("All");
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const filtered = items.filter(
-    (x) =>
-      (x.title + x.category + (x.note || ""))
+    (item) =>
+      (
+        String(item.title || "") +
+        String(item.category || "") +
+        String(item.note || "")
+      )
         .toLowerCase()
         .includes(search.toLowerCase()) &&
-      (cat === "All" || x.category === cat) &&
-      (type === "All" || x.type === type)
+      (cat === "All" || item.category === cat) &&
+      (type === "All" || item.type === type)
   );
+
+  const closeModal = () => {
+    setOpen(false);
+    setEditing(null);
+    setForm({ ...blank });
+  };
 
   const save = async (e) => {
     e.preventDefault();
 
+    if (saving) return;
+
+    if (!auth.currentUser) {
+      alert("Please sign in again.");
+      return;
+    }
+
     const data = {
-      ...form,
+      title: form.title.trim(),
       amount: Number(form.amount),
+      type: form.type,
+      category: form.category,
+      date: form.date,
+      note: form.note || "",
+      userId: auth.currentUser.uid,
     };
+
+    if (
+      !data.title ||
+      !Number.isFinite(data.amount) ||
+      data.amount <= 0 ||
+      !data.date ||
+      !["income", "expense"].includes(data.type)
+    ) {
+      alert("Please enter a title, valid amount, date, and transaction type.");
+      return;
+    }
+
+    setSaving(true);
 
     try {
       if (editing) {
@@ -688,40 +763,43 @@ function Transactions({ items, reload, exportCSV }) {
       } else {
         await addDoc(collection(db, "transactions"), {
           ...data,
-          userId: auth.currentUser.uid,
           createdAt: serverTimestamp(),
         });
       }
 
-      setOpen(false);
-      setEditing(null);
-      setForm(blank);
-      await reload();
+      closeModal();
+
+      reload().catch((error) => {
+        console.error("Transaction saved, but refresh failed:", error);
+      });
     } catch (error) {
-      console.error("Save transaction failed:", error);
-      alert("Could not save transaction. Please try again.");
+      console.error("Transaction save failed:", error);
+      alert(`Could not save transaction: ${error.message}`);
+    } finally {
+      setSaving(false);
     }
   };
 
-  const edit = (x) => {
-    setEditing(x);
-    setForm({ ...blank, ...x });
+  const edit = (item) => {
+    setEditing(item);
+    setForm({
+      ...blank,
+      ...item,
+      amount: String(item.amount ?? ""),
+      type: item.type === "income" ? "income" : "expense",
+    });
     setOpen(true);
   };
 
-  // Delete rule is checked against the existing document owner.
   const del = async (id) => {
     if (!window.confirm("Delete this transaction?")) return;
 
     try {
       await deleteDoc(doc(db, "transactions", id));
       await reload();
-      alert("Transaction deleted successfully.");
     } catch (error) {
       console.error("Delete transaction failed:", error);
-      alert(
-        "Could not delete transaction. Check your Firebase permissions."
-      );
+      alert("Could not delete transaction. Check your Firebase permissions.");
     }
   };
 
@@ -737,7 +815,7 @@ function Transactions({ items, reload, exportCSV }) {
           <button
             className="primary"
             onClick={() => {
-              setForm(blank);
+              setForm({ ...blank });
               setEditing(null);
               setOpen(true);
             }}
@@ -762,44 +840,51 @@ function Transactions({ items, reload, exportCSV }) {
         </div>
 
         <select value={cat} onChange={(e) => setCat(e.target.value)}>
-          <option>All</option>
-          {CATS.map((c) => (
-            <option key={c}>{c}</option>
+          <option value="All">All</option>
+          {CATS.map((category) => (
+            <option key={category} value={category}>
+              {category}
+            </option>
           ))}
         </select>
 
-        <select
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-        >
-          <option>All</option>
+        <select value={type} onChange={(e) => setType(e.target.value)}>
+          <option value="All">All</option>
           <option value="income">Income</option>
           <option value="expense">Expense</option>
         </select>
       </div>
 
       <section className="card">
-        {filtered.map((x) => (
-          <div className="row" key={x.id}>
+        {filtered.map((item) => (
+          <div className="row" key={item.id}>
             <div>
-              <b>{x.title}</b>
+              <b>{item.title}</b>
               <small>
-                {x.category} · {x.date}{" "}
-                {x.note ? `· ${x.note}` : ""}
+                {item.category} · {item.date}{" "}
+                {item.note ? `· ${item.note}` : ""}
               </small>
             </div>
 
             <div className="actions">
-              <strong className={x.type}>
-                {x.type === "income" ? "+" : "-"}
-                {money(x.amount)}
+              <strong className={item.type}>
+                {item.type === "income" ? "+" : "-"}
+                {money(item.amount)}
               </strong>
 
-              <button className="icon" onClick={() => edit(x)}>
+              <button
+                className="icon"
+                aria-label="Edit transaction"
+                onClick={() => edit(item)}
+              >
                 <Edit3 />
               </button>
 
-              <button className="icon" onClick={() => del(x.id)}>
+              <button
+                className="icon"
+                aria-label="Delete transaction"
+                onClick={() => del(item.id)}
+              >
                 <Trash2 />
               </button>
             </div>
@@ -814,27 +899,30 @@ function Transactions({ items, reload, exportCSV }) {
       {open && (
         <Modal
           title={editing ? "Edit transaction" : "Add transaction"}
-          close={() => setOpen(false)}
+          close={closeModal}
         >
           <form onSubmit={save}>
-            {["title", "amount", "date", "note"].map((k) => (
-              <label key={k}>
-                {k[0].toUpperCase() + k.slice(1)}
+            {["title", "amount", "date", "note"].map((key) => (
+              <label key={key}>
+                {key[0].toUpperCase() + key.slice(1)}
                 <input
                   type={
-                    k === "amount"
+                    key === "amount"
                       ? "number"
-                      : k === "date"
+                      : key === "date"
                         ? "date"
                         : "text"
                   }
-                  value={form[k]}
+                  value={form[key] ?? ""}
                   onChange={(e) =>
-                    setForm({ ...form, [k]: e.target.value })
+                    setForm((current) => ({
+                      ...current,
+                      [key]: e.target.value,
+                    }))
                   }
-                  required={k !== "note"}
-                  min={k === "amount" ? "0.01" : undefined}
-                  step={k === "amount" ? "0.01" : undefined}
+                  required={key !== "note"}
+                  min={key === "amount" ? "0.01" : undefined}
+                  step={key === "amount" ? "0.01" : undefined}
                 />
               </label>
             ))}
@@ -844,7 +932,10 @@ function Transactions({ items, reload, exportCSV }) {
               <select
                 value={form.type}
                 onChange={(e) =>
-                  setForm({ ...form, type: e.target.value })
+                  setForm((current) => ({
+                    ...current,
+                    type: e.target.value,
+                  }))
                 }
               >
                 <option value="expense">Expense</option>
@@ -857,16 +948,27 @@ function Transactions({ items, reload, exportCSV }) {
               <select
                 value={form.category}
                 onChange={(e) =>
-                  setForm({ ...form, category: e.target.value })
+                  setForm((current) => ({
+                    ...current,
+                    category: e.target.value,
+                  }))
                 }
               >
-                {CATS.map((c) => (
-                  <option key={c}>{c}</option>
+                {CATS.map((category) => (
+                  <option key={category} value={category}>
+                    {category}
+                  </option>
                 ))}
               </select>
             </label>
 
-            <button className="primary">Save</button>
+            <button
+              type="submit"
+              className="primary"
+              disabled={saving}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
           </form>
         </Modal>
       )}
@@ -879,10 +981,11 @@ function Analytics({ items }) {
     const categories = {};
 
     items
-      .filter((x) => x.type === "expense")
-      .forEach((x) => {
-        categories[x.category] =
-          (categories[x.category] || 0) + Number(x.amount);
+      .filter((item) => item.type === "expense")
+      .forEach((item) => {
+        categories[item.category] =
+          (categories[item.category] || 0) +
+          Number(item.amount || 0);
       });
 
     return Object.entries(categories).map(([name, value]) => ({
@@ -936,12 +1039,12 @@ function Analytics({ items }) {
                 outerRadius={120}
                 label
               >
-                {data.map((entry, i) => (
+                {data.map((entry, index) => (
                   <Cell
                     key={entry.name}
                     fill={
                       colors[entry.name] ||
-                      fallbackColors[i % fallbackColors.length]
+                      fallbackColors[index % fallbackColors.length]
                     }
                     stroke="#101326"
                     strokeWidth={2}
@@ -949,16 +1052,7 @@ function Analytics({ items }) {
                 ))}
               </Pie>
 
-              <Tooltip
-                formatter={(v) => money(v)}
-                contentStyle={{
-                  backgroundColor: "#101326",
-                  border: "1px solid #514080",
-                  borderRadius: 12,
-                  color: "#FFFFFF",
-                }}
-              />
-
+              <Tooltip formatter={(value) => money(value)} />
               <Legend />
             </PieChart>
           </ResponsiveContainer>
@@ -975,36 +1069,83 @@ function Budgets({ budgets, items, reload }) {
   const [edit, setEdit] = useState(null);
   const [cat, setCat] = useState("Food");
   const [limit, setLimit] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const closeModal = () => {
+    setOpen(false);
+    setEdit(null);
+    setCat("Food");
+    setLimit("");
+  };
 
   const save = async (e) => {
     e.preventDefault();
 
-    const d = {
-      category: cat,
-      limit: Number(limit),
-      userId: auth.currentUser.uid,
-    };
+    if (saving) return;
+
+    if (!auth.currentUser) {
+      alert("Please sign in again.");
+      return;
+    }
+
+    const amount = Number(limit);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert("Enter a valid budget limit.");
+      return;
+    }
+
+    setSaving(true);
 
     try {
+      const data = {
+        category: cat,
+        limit: amount,
+        userId: auth.currentUser.uid,
+      };
+
       if (edit) {
-        await updateDoc(doc(db, "budgets", edit.id), d);
+        await updateDoc(doc(db, "budgets", edit.id), data);
       } else {
-        await addDoc(collection(db, "budgets"), d);
+        await addDoc(collection(db, "budgets"), data);
       }
 
-      setOpen(false);
-      setEdit(null);
-      await reload();
+      closeModal();
+
+      reload().catch((error) => {
+        console.error("Budget refresh failed:", error);
+      });
     } catch (error) {
       console.error("Save budget failed:", error);
-      alert("Could not save budget.");
+      alert(`Could not save budget: ${error.message}`);
+    } finally {
+      setSaving(false);
     }
   };
 
-  const spent = (c) =>
+  const spent = (category) =>
     items
-      .filter((x) => x.type === "expense" && x.category === c)
-      .reduce((s, x) => s + Number(x.amount), 0);
+      .filter(
+        (item) =>
+          item.type === "expense" &&
+          item.category === category
+      )
+      .reduce(
+        (sum, item) => sum + Number(item.amount || 0),
+        0
+      );
+
+  const deleteBudget = async (id) => {
+    if (!window.confirm("Delete budget?")) return;
+
+    try {
+      await deleteDoc(doc(db, "budgets", id));
+      await reload();
+    } catch (error) {
+      console.error("Delete budget failed:", error);
+      alert("Could not delete budget.");
+    }
+  };
 
   return (
     <>
@@ -1028,28 +1169,40 @@ function Budgets({ budgets, items, reload }) {
       </div>
 
       <div className="budgets">
-        {budgets.map((b) => {
-          const s = spent(b.category);
-          const p =
-            b.limit > 0 ? Math.min(100, (s / b.limit) * 100) : 0;
+        {budgets.map((budget) => {
+          const totalSpent = spent(budget.category);
+
+          const percent =
+            budget.limit > 0
+              ? Math.min(
+                  100,
+                  (totalSpent / budget.limit) * 100
+                )
+              : 0;
 
           return (
-            <section className="card budget" key={b.id}>
+            <section
+              className="card budget"
+              key={budget.id}
+            >
               <div className="section">
                 <div>
-                  <h2>{b.category}</h2>
+                  <h2>{budget.category}</h2>
+
                   <p className="muted">
-                    {money(s)} of {money(b.limit)}
+                    {money(totalSpent)} of{" "}
+                    {money(budget.limit)}
                   </p>
                 </div>
 
                 <div className="actions">
                   <button
                     className="icon"
+                    aria-label="Edit budget"
                     onClick={() => {
-                      setEdit(b);
-                      setCat(b.category);
-                      setLimit(b.limit);
+                      setEdit(budget);
+                      setCat(budget.category);
+                      setLimit(String(budget.limit));
                       setOpen(true);
                     }}
                   >
@@ -1058,17 +1211,10 @@ function Budgets({ budgets, items, reload }) {
 
                   <button
                     className="icon"
-                    onClick={async () => {
-                      if (!window.confirm("Delete budget?")) return;
-
-                      try {
-                        await deleteDoc(doc(db, "budgets", b.id));
-                        await reload();
-                      } catch (error) {
-                        console.error("Delete budget failed:", error);
-                        alert("Could not delete budget.");
-                      }
-                    }}
+                    aria-label="Delete budget"
+                    onClick={() =>
+                      deleteBudget(budget.id)
+                    }
                   >
                     <Trash2 />
                   </button>
@@ -1076,11 +1222,15 @@ function Budgets({ budgets, items, reload }) {
               </div>
 
               <div className="progress">
-                <span style={{ width: p + "%" }} />
+                <span
+                  style={{ width: percent + "%" }}
+                />
               </div>
 
               <small>
-                {p >= 100 ? "Budget exceeded" : Math.round(p) + "% used"}
+                {percent >= 100
+                  ? "Budget exceeded"
+                  : Math.round(percent) + "% used"}
               </small>
             </section>
           );
@@ -1090,33 +1240,50 @@ function Budgets({ budgets, items, reload }) {
       {open && (
         <Modal
           title={edit ? "Edit budget" : "Add budget"}
-          close={() => setOpen(false)}
+          close={closeModal}
         >
           <form onSubmit={save}>
             <label>
               Category
+
               <select
                 value={cat}
-                onChange={(e) => setCat(e.target.value)}
+                onChange={(e) =>
+                  setCat(e.target.value)
+                }
               >
-                {CATS.map((c) => (
-                  <option key={c}>{c}</option>
+                {CATS.map((category) => (
+                  <option
+                    key={category}
+                    value={category}
+                  >
+                    {category}
+                  </option>
                 ))}
               </select>
             </label>
 
             <label>
               Monthly limit (₹)
+
               <input
                 type="number"
                 min="1"
                 value={limit}
-                onChange={(e) => setLimit(e.target.value)}
+                onChange={(e) =>
+                  setLimit(e.target.value)
+                }
                 required
               />
             </label>
 
-            <button className="primary">Save budget</button>
+            <button
+              type="submit"
+              className="primary"
+              disabled={saving}
+            >
+              {saving ? "Saving…" : "Save budget"}
+            </button>
           </form>
         </Modal>
       )}
@@ -1126,7 +1293,27 @@ function Budgets({ budgets, items, reload }) {
 
 function Profile({ user }) {
   const [name, setName] = useState(user.displayName || "");
-  const [msg, setMsg] = useState("");
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const saveProfile = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setMessage("");
+
+    try {
+      await updateProfile(auth.currentUser, {
+        displayName: name,
+      });
+
+      setMessage("Profile updated.");
+    } catch (error) {
+      console.error("Profile update failed:", error);
+      setMessage("Could not update profile.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <>
@@ -1139,38 +1326,35 @@ function Profile({ user }) {
 
       <section className="card profile">
         <div className="avatar">
-          {(name || user.email)[0].toUpperCase()}
+          {(name || user.email || "U")[0].toUpperCase()}
         </div>
 
         <h2>{name || "Your profile"}</h2>
         <p className="muted">{user.email}</p>
 
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-
-            try {
-              await updateProfile(auth.currentUser, {
-                displayName: name,
-              });
-              setMsg("Profile updated.");
-            } catch (error) {
-              console.error("Profile update failed:", error);
-              setMsg("Could not update profile.");
-            }
-          }}
-        >
+        <form onSubmit={saveProfile}>
           <label>
             Display name
+
             <input
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) =>
+                setName(e.target.value)
+              }
             />
           </label>
 
-          <button className="primary">Save profile</button>
+          <button
+            type="submit"
+            className="primary"
+            disabled={saving}
+          >
+            {saving ? "Saving…" : "Save profile"}
+          </button>
 
-          {msg && <p className="success">{msg}</p>}
+          {message && (
+            <p className="success">{message}</p>
+          )}
         </form>
       </section>
     </>
@@ -1179,14 +1363,32 @@ function Profile({ user }) {
 
 function Modal({ title, close, children }) {
   return (
-    <div className="modalbg" onMouseDown={close}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+    <div
+      className="modalbg"
+      onMouseDown={close}
+    >
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onMouseDown={(e) =>
+          e.stopPropagation()
+        }
+      >
         <div className="section">
           <h2>{title}</h2>
-          <button className="icon" onClick={close}>
+
+          <button
+            type="button"
+            className="icon"
+            aria-label="Close modal"
+            onClick={close}
+          >
             ×
           </button>
         </div>
+
         {children}
       </div>
     </div>
